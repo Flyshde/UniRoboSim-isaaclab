@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from unirobosim import (
     CameraModality,
     CommandMode,
+    ContactDiagnosticsRequest,
+    ContactDiagnosticsSample,
     DebugBatch,
     EntityPath,
     KinematicTarget,
@@ -31,6 +33,19 @@ from unirobosim import (
 )
 
 Matrix = tuple[tuple[float, ...], ...]
+
+
+@runtime_checkable
+class NativeContactDiagnosticsDriver(Protocol):
+    def start_contact_diagnostics(self, request: ContactDiagnosticsRequest) -> int: ...
+
+    def contact_diagnostics(
+        self, epoch: int, after_sequence: int,
+    ) -> tuple[int, tuple[ContactDiagnosticsSample, ...]]: ...
+
+    def stop_contact_diagnostics(self) -> None: ...
+
+
 Vector3 = tuple[float, float, float]
 Quaternion = tuple[float, float, float, float]
 PointBatch = tuple[tuple[Vector3, ...], ...]

@@ -375,3 +375,29 @@ refreshing parents; selected backing nodes require zero relative initial velocit
 the installed schema does not document a unit. It is not `linear_damping_per_s`.
 Initial authoring failures fail the whole World build and clean the newly created
 soft-body roots; partially authored bodies must never continue simulation.
+
+
+## Optional contact diagnostics
+
+`contact.diagnostics@1` is a default-off `ContactDiagnosticsWorld` extension.
+Start it with a `ContactDiagnosticsRequest` selecting a standalone rigid subject
+and explicit rigid/articulation-link partners (`KinematicTarget`). Start returns
+an epoch. `contact_diagnostics(epoch, after_sequence)` reads bounded,
+non-destructive history, bounded by the requested substep count and 262,144 force points;
+a stale epoch or overwritten cursor fails explicitly.
+Stop, reset, checkpoint restore, or world close releases collection.
+Each sample identifies its world step, one-based substep, substep count, and
+actual physics timestep. Forces act on the subject, in environment-local world
+coordinates, in newtons. Normal and friction points are separate. Torque is
+computed at the **start-of-substep** subject COM from each force's own application point.
+`*_start_*` fields preserve that contact-generation frame; other body poses/velocities
+are post-integration. Native mass is included for force-balance checks. Pose arrays
+contain XYZ followed by XYZW; velocity contains linear then angular SI components.
+The measurements alone do not establish a friction limit. Isaac Lab currently
+supports one environment without particle fluid; unsupported backends reject the
+optional capability. Collection adds readback cost and does not command bodies
+or change material values.
+
+Only explicitly selected contact pairs are reported. Unfiltered SDK aggregate forces
+are excluded: the validated runtime returned a doubled static-support aggregate,
+while selected pair forces passed per-substep momentum-balance checks.

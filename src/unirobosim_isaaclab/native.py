@@ -21,6 +21,8 @@ from urllib.parse import unquote, urlparse
 from unirobosim import (
     CameraModality,
     CommandMode,
+    ContactDiagnosticsRequest,
+    ContactDiagnosticsSample,
     DebugBatch,
     DebugLifetimeMode,
     DebugMeshResource,
@@ -1262,6 +1264,8 @@ class IsaacLabNativeWorld:
         self._render_transform_publishers: dict[tuple[str, ...], Any] = {}
         self._usd_tensor_view: Any | None = None
         self._contacts: dict[EntityPath, Any] = {}
+        self._contact_diagnostics: Any = None
+        self._contact_diagnostics_epoch = 0
         self._render_deformables: dict[EntityPath, list[Any]] = {}
         self._deformables: dict[EntityPath, Any] = {}
         self._fluids: dict[EntityPath, tuple[_FluidSet, ...]] = {}
@@ -3310,6 +3314,7 @@ class IsaacLabNativeWorld:
             self._initial_deformable[path] = (state, target)
 
     def reset(self, environment_indices: tuple[int, ...]) -> None:
+        self.stop_contact_diagnostics()
         for path, meshes in getattr(self, "_render_deformables", {}).items():
             entity = self._entity_specs[path]
             spec = entity.deformable
@@ -5221,6 +5226,7 @@ class IsaacLabNativeWorld:
         if type(state) is not dict:
             raise ValueError("checkpoint native state must be a dictionary")
         staged = self._stage_checkpoint(state)
+        self.stop_contact_diagnostics()
         rollback = self._stage_checkpoint(self.capture_checkpoint())
         try:
             self._apply_staged_checkpoint(staged)
@@ -5731,6 +5737,65 @@ class IsaacLabNativeWorld:
         self._sim.forward()
         self._update_assets(0.0)
         self._invalidate_render()
+
+    def start_contact_diagnostics(self, request: ContactDiagnosticsRequest) -> int:
+        from .contact_diagnostics import NativeContactDiagnostics
+
+        if self._contact_diagnostics is not None:
+            raise RuntimeError("contact diagnostics already has an owner")
+        if self._spec.environments.count != 1 or self._has_fluid:
+            raise ValueError("contact diagnostics requires one environment without particle fluid")
+        if request.subject.link_name is not None or request.subject.entity_path not in self._rigids:
+            raise ValueError("contact diagnostics subject must be a standalone rigid body")
+        stage = self._m.sim_utils.get_current_stage()
+        paths = []
+        for target in (request.subject, *request.partners):
+            if target.entity_path not in self._rigids and target.entity_path not in self._articulations:
+                raise ValueError("contact diagnostics target is not a supported rigid/articulation body")
+            root = stage.GetPrimAtPath(f"/World/env_0/{_native_name(target.entity_path)}")
+            if not root:
+                raise ValueError("contact diagnostics target root is absent")
+            matches = [str(p.GetPath()) for p in self._m.Usd.PrimRange(root)
+                       if p.HasAPI(self._m.UsdPhysics.RigidBodyAPI)
+                       and (target.link_name is None or p.GetName() == target.link_name)]
+            if len(matches) != 1:
+                raise ValueError("contact diagnostics target must resolve to exactly one rigid body")
+            paths.append(matches[0])
+        if len(set(paths)) != len(paths):
+            raise ValueError("contact diagnostics selections resolve to the same physical body")
+        assert self._sim is not None
+        actual_dt = float(self._sim.get_physics_dt())
+        if not math.isclose(actual_dt, self._native_dt, rel_tol=1e-10, abs_tol=1e-12):
+            raise ValueError("contact diagnostics native timestep differs from the admitted timestep")
+        # Reuse the simulator-owned public Warp view; do not create another lifecycle owner.
+        tensor = self._sim.physics_sim_view
+        if tensor is None:
+            raise RuntimeError("contact diagnostics requires an active simulation view")
+        bodies = [tensor.create_rigid_body_view(p) for p in paths]
+        if any(v.count != 1 or tuple(v.prim_paths) != (p,) for v, p in zip(bodies, paths, strict=True)):
+            raise ValueError("contact diagnostics rigid-body mapping changed")
+        contact = tensor.create_rigid_contact_view(paths[0], filter_patterns=paths[1:],
+                                                  max_contact_data_count=request.max_contact_points)
+        raw_filters = contact.filter_paths
+        filters = tuple(p for group in raw_filters for p in ((group,) if isinstance(group, str) else group))
+        if (contact.sensor_count != 1 or contact.filter_count != len(paths)-1
+                or tuple(contact.sensor_paths) != (paths[0],) or filters != tuple(paths[1:])):
+            raise ValueError(
+                f"contact diagnostics pair mapping is ambiguous: sensors={contact.sensor_paths!r}, "
+                f"filters={raw_filters!r}, counts={(contact.sensor_count, contact.filter_count)!r}"
+            )
+        self._contact_diagnostics = NativeContactDiagnostics(request, bodies, contact, self._origins_cpu[0])
+        self._contact_diagnostics_epoch += 1
+        return self._contact_diagnostics_epoch
+
+    def contact_diagnostics(self, epoch: int, after_sequence: int) -> tuple[int, tuple[ContactDiagnosticsSample, ...]]:
+        evidence = self._contact_diagnostics
+        if evidence is None or epoch != self._contact_diagnostics_epoch:
+            raise ValueError("contact diagnostics is inactive or its epoch is stale")
+        return evidence.sequence, evidence.read(after_sequence)
+
+    def stop_contact_diagnostics(self) -> None:
+        self._contact_diagnostics = None
 
     def read_contact(self, path: EntityPath) -> Matrix:
         if path in self._usd_rigids:
@@ -6427,11 +6492,16 @@ class IsaacLabNativeWorld:
                     self._sync_all_mounted_cameras()
                 # Particle instances must see the positions after this physics step.
                 deferred_particle_render = render and bool(self._fluids)
+                evidence = getattr(self, "_contact_diagnostics", None)
+                if evidence is not None:
+                    evidence.begin_step()
                 self._sim.step(render=render and not deferred_particle_render)
                 self._invalidate_render()
                 if render and not deferred_particle_render:
                     self._mark_rendered()
                 self._update_assets(self._native_dt)
+                if evidence is not None:
+                    evidence.sample(self._step_index+1, substep_index+1, self._spec.physics.substeps, self._native_dt)
                 if deferred_particle_render:
                     self._ensure_camera_render()
             self._step_index += 1
@@ -6461,6 +6531,7 @@ class IsaacLabNativeWorld:
     def _close(self, *, notify_runtime: bool) -> None:
         if self._closed:
             return
+        self.stop_contact_diagnostics()
         print("[FastSim capture settings histogram]", getattr(self, "_capture_settings_histogram", {}), flush=True)
         print(
             "[FastSim render counters]",

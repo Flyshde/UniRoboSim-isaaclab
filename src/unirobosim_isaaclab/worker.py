@@ -22,7 +22,17 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import unirobosim
-from unirobosim import CommandMode, DebugBatch, EntityPath, KinematicTarget, PointCommandMode, Pose, WorldSpec
+from unirobosim import (
+    CommandMode,
+    ContactDiagnosticsRequest,
+    ContactDiagnosticsSample,
+    DebugBatch,
+    EntityPath,
+    KinematicTarget,
+    PointCommandMode,
+    Pose,
+    WorldSpec,
+)
 
 from ._version import DISTRIBUTION_VERSION
 from .config import IsaacLabAdapterConfig
@@ -30,6 +40,7 @@ from .native_protocols import (
     Matrix,
     NativeArticulationCommand,
     NativeCameraCalibration,
+    NativeContactDiagnosticsDriver,
     NativeEncodedSensorFrame,
     NativeEncodedSensorRequest,
     NativeEntityPrimState,
@@ -398,6 +409,21 @@ def _dispatch(
         return None, None, True
 
     active = _require_world(world, operation)
+    if operation in {"start_contact_diagnostics", "contact_diagnostics", "stop_contact_diagnostics"}:
+        if not isinstance(active, NativeContactDiagnosticsDriver):
+            raise RuntimeError("native contact diagnostics is unavailable")
+        try:
+            if operation == "start_contact_diagnostics":
+                return active, active.start_contact_diagnostics(cast(ContactDiagnosticsRequest, args[0])), False
+            if operation == "contact_diagnostics":
+                return active, active.contact_diagnostics(cast(int, args[0]), cast(int, args[1])), False
+            active.stop_contact_diagnostics()
+            return active, None, False
+        except Exception as exc:
+            # Keep the native reason locally before the public authority boundary scrubs it.
+            print("[FastSim native contact diagnostics failure]", operation, flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+            raise
     if operation == "physics_diagnostics":
         return active, active.physics_diagnostics(), False
     if operation == "reset":
@@ -1315,6 +1341,19 @@ class IsaacLabWorkerWorld:
             child_path,
             environment_index,
         )
+
+    def start_contact_diagnostics(self, request: ContactDiagnosticsRequest) -> int:
+        self._ensure_open("start_contact_diagnostics")
+        return cast(int, self._runtime._request("start_contact_diagnostics", request))
+
+    def contact_diagnostics(self, epoch: int, after_sequence: int) -> tuple[int, tuple[ContactDiagnosticsSample, ...]]:
+        self._ensure_open("contact_diagnostics")
+        return cast(tuple[int, tuple[ContactDiagnosticsSample, ...]],
+                    self._runtime._request("contact_diagnostics", epoch, after_sequence))
+
+    def stop_contact_diagnostics(self) -> None:
+        self._ensure_open("stop_contact_diagnostics")
+        self._runtime._request("stop_contact_diagnostics")
 
     def read_contact(self, path: EntityPath) -> Matrix:
         self._ensure_open("read_contact")
