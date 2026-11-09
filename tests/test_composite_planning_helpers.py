@@ -486,6 +486,27 @@ def test_filtered_pair_encoding_rejects_unowned_pair_and_bit_exhaustion() -> Non
         )
 
 
+def test_complete_cable_filter_graph_fits_uint32_and_preserves_every_pair() -> None:
+    bodies = tuple(f"/cable/body_{i:03d}" for i in range(102))
+    filtered = frozenset((bodies[i], bodies[j]) for i in range(102)
+                         for j in range(i+1, min(i+3, 102)))
+    encoding, next_bit, classes = _exact_filtered_pair_encoding(
+        bodies, filtered, first_class_bit=1,
+        self_filtered_bodies=frozenset((bodies[0], bodies[-1])),
+    )
+    assert next_bit == 28
+    assert _exact_filtered_pair_encoding(tuple(reversed(bodies)), filtered, first_class_bit=1,
+        self_filtered_bodies=frozenset((bodies[0], bodies[-1]))) == (encoding, next_bit, classes)
+    for i, left in enumerate(bodies):
+        assert _filter_interacts(encoding, left, left) == (i not in (0, 101))
+        assert _filter_interacts(encoding, left, "/unrelated/robot")
+        for right in bodies[i+1:]:
+            assert _filter_interacts(encoding, left, right) == ((left, right) not in filtered)
+    with pytest.raises(NativePlanningError, match="collision_filter_unsupported"):
+        _exact_filtered_pair_encoding(bodies, filtered, first_class_bit=6,
+            self_filtered_bodies=frozenset((bodies[0], bodies[-1])))
+
+
 def test_embedded_joint_descriptor_uses_component_authored_alias() -> None:
     class _Attribute:
         def __init__(self, value: object) -> None:

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+import unirobosim
 from unirobosim import (
     CHECKPOINT_CAPABILITY_ID,
     COMPOSITE_WORLD_SCHEMA_VERSION,
@@ -335,6 +336,8 @@ CAPABILITIES = CapabilitySet(
         CapabilityDeclaration(CapabilityId("scene.snapshot@1")),
         CapabilityDeclaration(CapabilityId("scene.delta@1")),
         CapabilityDeclaration(CapabilityId("scene.command.pose@1")),
+        *((CapabilityDeclaration(CapabilityId("physics.compliant_connections@1")),)
+          if hasattr(unirobosim, "CompliantConnectionSpec") else ()),
         CapabilityDeclaration(
             CapabilityId("scene.command.attachment@1"),
             FrozenMap(

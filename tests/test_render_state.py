@@ -321,6 +321,32 @@ def _assert_native_render_state_batches_writes_and_syncs_once_without_physics() 
     assert points.velocities.set_count == 0
 
 
+def _assert_embedded_rigid_render_state_reaches_fabric_publication() -> None:
+    world, simulation, _, _, _, events = _native_world()
+    path = EntityPath("/box")
+    poses = torch.tensor([[0., 0., 0., 0., 0., 0., 1.]]).repeat(2, 1)
+    velocities = torch.zeros((2, 6))
+    world._rigids.clear()
+    world._usd_rigid_views[path] = SimpleNamespace(
+        get_transforms=lambda: poses,
+        get_coms=lambda: torch.zeros((2, 7)),
+        set_transforms=lambda values, indices: poses.index_copy_(0, indices, values),
+        set_velocities=lambda values, indices: velocities.index_copy_(0, indices, values),
+    )
+    world._usd_rigid_wrenches[path] = (torch.ones((2, 3)), torch.ones((2, 3)))
+    world._m.omni_physx = SimpleNamespace(get_physx_interface=lambda: SimpleNamespace(
+        update_transformations=lambda *args: events.append("usd")
+    ))
+    published = []
+    world._publish_render_body_transforms = lambda arms, bodies: published.append(bodies)
+    payload = PackedFloat32Array((1, 2, 3), struct.pack("<6f", 1., 2., 3., 4., 5., 6.))
+    world.apply_render_state(_native_frame(fluid_payload=payload))
+    assert published == [(path,)]
+    assert poses[0, :3].tolist() == [3., 2., 1.]
+    assert poses[1, :3].tolist() == [0., 0., 0.]
+    assert simulation.step_count == 0 and world._step_index == 9
+
+
 def _assert_native_render_state_rejects_nonfinite_packed_payload_before_any_write() -> None:
     world, simulation, articulation, rigid, points, events = _native_world()
     payload = PackedFloat32Array(
@@ -356,6 +382,7 @@ def _assert_direct_rigid_pose_invalidates_an_already_rendered_revision() -> None
     "assertion",
     (
         "_assert_native_render_state_batches_writes_and_syncs_once_without_physics",
+        "_assert_embedded_rigid_render_state_reaches_fabric_publication",
         "_assert_native_render_state_rejects_nonfinite_packed_payload_before_any_write",
         "_assert_direct_rigid_pose_invalidates_an_already_rendered_revision",
     ),

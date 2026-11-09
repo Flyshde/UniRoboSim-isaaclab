@@ -456,7 +456,10 @@ def _exact_filtered_pair_encoding(
         classes.sort(key=lambda item: item[0])
 
     if first_class_bit + len(classes) > 32:
-        raise NativePlanningError("collision_filter_unsupported")
+        return _sparse_filtered_pair_encoding(
+            bodies, filtered_pairs, first_class_bit=first_class_bit,
+            self_filtered_bodies=self_filtered_bodies,
+        )
     class_by_body = {body: index for index, members in enumerate(classes) for body in members}
     group_by_class = tuple(1 << (first_class_bit + index) for index in range(len(classes)))
     encoding: dict[str, tuple[int, int]] = {}
@@ -482,6 +485,70 @@ def _exact_filtered_pair_encoding(
         if not (left_group & _DEFAULT_COLLISION_MASK) or not (_DEFAULT_COLLISION_GROUP & left_mask):
             raise NativePlanningError("collision_filter_unsupported")
     return encoding, first_class_bit + len(classes), tuple(classes)
+
+
+def _sparse_filtered_pair_encoding(
+    bodies: tuple[str, ...],
+    filtered_pairs: frozenset[tuple[str, str]],
+    *,
+    first_class_bit: int,
+    self_filtered_bodies: frozenset[str],
+) -> tuple[dict[str, tuple[int, int]], int, tuple[tuple[str, ...], ...]]:
+    """Exactly encode a two-degenerate filter graph; retain the uint32 contract.
+
+    Over GF(5), distinct degree-at-most-two polynomials agree at at most two
+    points. Each five-bit code therefore has a bit outside the union of any
+    two other codes. Orient the filter graph with outdegree at most two and
+    mask only those outgoing neighbours. Nonedges remain enabled in BOTH
+    directions. Compound bodies additionally receive unique self-filter bits.
+    Unsupported graphs or exhausted bits still fail closed.
+    """
+    participants = tuple(sorted({body for pair in filtered_pairs for body in pair} | self_filtered_bodies))
+    neighbours = {body: set() for body in participants}
+    for left, right in filtered_pairs:
+        neighbours[left].add(right)
+        neighbours[right].add(left)
+    remaining = set(participants)
+    outgoing: dict[str, tuple[str, ...]] = {}
+    while remaining:
+        body = min(remaining, key=lambda item: (len(neighbours[item] & remaining), item))
+        targets = tuple(sorted(neighbours[body] & remaining))
+        if len(targets) > 2:
+            raise NativePlanningError("collision_filter_unsupported")
+        outgoing[body] = targets
+        remaining.remove(body)
+    ordinary = tuple(body for body in participants if body not in self_filtered_bodies)
+    code_bits = 25 if ordinary else 0
+    used_bits = code_bits + len(self_filtered_bodies)
+    if len(ordinary) > 125 or first_class_bit + used_bits > 32:
+        raise NativePlanningError("collision_filter_unsupported")
+    groups: dict[str, int] = {}
+    for index, body in enumerate(ordinary):
+        a, remainder = divmod(index, 25)
+        b, c = divmod(remainder, 5)
+        groups[body] = sum(1 << (first_class_bit + 5 * x + (a*x*x + b*x + c) % 5)
+                           for x in range(5))
+    for index, body in enumerate(sorted(self_filtered_bodies)):
+        groups[body] = 1 << (first_class_bit + code_bits + index)
+    encoding = {}
+    for body in participants:
+        masked = groups[body] if body in self_filtered_bodies else 0
+        for target in outgoing[body]:
+            masked |= groups[target]
+        encoding[body] = (groups[body], _DEFAULT_COLLISION_MASK & ~masked)
+    for index, left in enumerate(bodies):
+        lg, lm = encoding.get(left, (_DEFAULT_COLLISION_GROUP, _DEFAULT_COLLISION_MASK))
+        if bool(lg & lm) != (left not in self_filtered_bodies):
+            raise NativePlanningError("collision_filter_unsupported")
+        for right in bodies[index+1:]:
+            rg, rm = encoding.get(right, (_DEFAULT_COLLISION_GROUP, _DEFAULT_COLLISION_MASK))
+            if (bool(lg & rm) and bool(rg & lm)) != (_canonical_body_pair(left, right) not in filtered_pairs):
+                raise NativePlanningError("collision_filter_unsupported")
+        if not (lg & _DEFAULT_COLLISION_MASK) or not (_DEFAULT_COLLISION_GROUP & lm):
+            raise NativePlanningError("collision_filter_unsupported")
+    classes = tuple(tuple(body for body in participants if groups[body] & (1 << bit))
+                    for bit in range(first_class_bit, first_class_bit + used_bits))
+    return encoding, first_class_bit + used_bits, classes
 
 
 def _triangulate_faces(
@@ -866,16 +933,21 @@ class _PlanningAdmission:
         bodies: dict[str, Any],
         body_name_by_path: dict[str, str],
         collision_owner_paths: tuple[str, ...],
+        *,
+        articulated: bool = True,
     ) -> tuple[dict[str, tuple[int, int]], str, str, int, int, bool]:
         """Project one articulation's effective body filters without approximation."""
 
         articulation_roots = tuple(
             prim for prim in self._walk(root) if prim.HasAPI(self._m.UsdPhysics.ArticulationRootAPI)
         )
-        if len(articulation_roots) != 1:
+        if articulated and len(articulation_roots) != 1:
             raise NativePlanningError("collision_filter_unsupported")
-        physx_articulation = self._m.PhysxSchema.PhysxArticulationAPI(articulation_roots[0])
-        enabled_self_collisions = physx_articulation.GetEnabledSelfCollisionsAttr().Get()
+        if articulated:
+            physx_articulation = self._m.PhysxSchema.PhysxArticulationAPI(articulation_roots[0])
+            enabled_self_collisions = physx_articulation.GetEnabledSelfCollisionsAttr().Get()
+        else:
+            enabled_self_collisions = True
         if type(enabled_self_collisions) is not bool:
             raise NativePlanningError("collision_filter_unsupported")
 
@@ -1431,6 +1503,20 @@ class _PlanningAdmission:
         moving_absolute_roots = tuple(f"{root_path}/{relative}" for relative in moving_relative_roots)
         all_body_prims = tuple(prim for prim in self._walk(root) if prim.HasAPI(self._m.UsdPhysics.RigidBodyAPI))
         bodies = {str(prim.GetPath()): prim for prim in all_body_prims}
+        collision_owners = tuple(
+            owner for prim in self._walk(root)
+            if prim.HasAPI(self._m.UsdPhysics.CollisionAPI)
+            and collision_enabled_for_planning(self._m.UsdPhysics, prim)
+            if (owner := _nearest_body(str(prim.GetPath()), bodies)) is not None
+        )
+        filter_projection = self._articulation_collision_filter_projection(
+            root, bodies, {path: path.removeprefix(f"{root_path}/") for path in bodies},
+            collision_owners, articulated=False,
+        )
+        if not hasattr(self, "_composite_filters"):
+            self._composite_filters = {}
+        self._composite_filters[spec.path] = filter_projection
+        encoding, graph_sha, pairs_sha, pair_count, self_count, self_enabled = filter_projection
         retained_bodies = {
             path: prim
             for path, prim in bodies.items()
@@ -1475,6 +1561,13 @@ class _PlanningAdmission:
                 None if owner_name is None else link_id_by_name[owner_name],
                 entity_frame_id if owner_name is None else link_frame_by_name[owner_name],
                 motion=motion,
+                collision_group=encoding.get(owner_path, (_DEFAULT_COLLISION_GROUP, _DEFAULT_COLLISION_MASK))[0],
+                collision_mask=encoding.get(owner_path, (_DEFAULT_COLLISION_GROUP, _DEFAULT_COLLISION_MASK))[1],
+                collision_filter_graph_sha256=graph_sha,
+                collision_filter_distinct_pairs_sha256=pairs_sha,
+                collision_filter_pair_count=pair_count,
+                collision_filter_self_owner_count=self_count,
+                enabled_self_collisions=self_enabled,
             )
             geometry_by_link[owner_name].extend(collision_geometries)
             for geometry in collision_geometries:
@@ -1677,6 +1770,9 @@ class _PlanningAdmission:
             raise NativePlanningError("topology_unsupported")
 
         moving_root = f"{root_path}/{binding.root_body_prim_path}"
+        encoding, graph_sha, pairs_sha, pair_count, self_count, self_enabled = (
+            self._composite_filters[container_spec.path]
+        )
         geometry_by_link: dict[str, list[PlanningGeometryDescriptor]] = {name: [] for name in link_id_by_name}
         for prim in self._walk(self._stage.GetPrimAtPath(moving_root)):
             if not prim.HasAPI(self._m.UsdPhysics.CollisionAPI):
@@ -1695,6 +1791,13 @@ class _PlanningAdmission:
                 link_id_by_name[owner_name],
                 link_frame_by_name[owner_name],
                 source_spec=container_spec,
+                collision_group=encoding.get(owner_path, (_DEFAULT_COLLISION_GROUP, _DEFAULT_COLLISION_MASK))[0],
+                collision_mask=encoding.get(owner_path, (_DEFAULT_COLLISION_GROUP, _DEFAULT_COLLISION_MASK))[1],
+                collision_filter_graph_sha256=graph_sha,
+                collision_filter_distinct_pairs_sha256=pairs_sha,
+                collision_filter_pair_count=pair_count,
+                collision_filter_self_owner_count=self_count,
+                enabled_self_collisions=self_enabled,
             )
             geometry_by_link[owner_name].extend(collision_geometries)
             for geometry in collision_geometries:
@@ -2085,7 +2188,8 @@ class _PlanningAdmission:
         contact_response = self._validate_collision_common(prim)
         matrix = _effective_collision_relative_transform(self._m, prim, owner_body)
         mesh_capable = not any(
-            prim.IsA(schema) for schema in (self._m.UsdGeom.Cube, self._m.UsdGeom.Sphere, self._m.UsdGeom.Cylinder)
+            prim.IsA(schema) for schema in (self._m.UsdGeom.Cube, self._m.UsdGeom.Sphere,
+                                           self._m.UsdGeom.Cylinder, self._m.UsdGeom.Capsule)
         )
         local_pose, scale, reflection, baked_linear = _collision_pose_scale_bake(
             self._m,
@@ -2160,15 +2264,28 @@ class _PlanningAdmission:
                     inline=inline,
                 ),
             )
-        if prim.IsA(self._m.UsdGeom.Cylinder):
-            cylinder = self._m.UsdGeom.Cylinder(prim)
+        if prim.IsA(self._m.UsdGeom.Cylinder) or prim.IsA(self._m.UsdGeom.Capsule):
+            is_capsule = prim.IsA(self._m.UsdGeom.Capsule)
+            cylinder = (self._m.UsdGeom.Capsule if is_capsule else self._m.UsdGeom.Cylinder)(prim)
             radius = float(cylinder.GetRadiusAttr().Get())
             height = float(cylinder.GetHeightAttr().Get())
             axis = str(cylinder.GetAxisAttr().Get() or "Z").upper()
             if not math.isfinite(radius) or radius <= 0.0 or not math.isfinite(height) or height <= 0.0:
                 raise NativePlanningError("collision_geometry_unsupported")
             cylinder_pose, cylinder_scale = _cylinder_pose_scale(local_pose, scale, axis)
-            inline = PlanningPrimitiveGeometry(PlanningGeometryRepresentation.CYLINDER, (radius, height))
+            if is_capsule:
+                # Rotated unit bases acquire a few float64 ULPs of apparent
+                # radial anisotropy. Mission's radial primitive contract uses
+                # exact equality. Canonicalize roundoff only; reject a truly
+                # elliptical cross section instead of changing its collision.
+                radial = max(cylinder_scale[0], cylinder_scale[1])
+                if abs(cylinder_scale[0] - cylinder_scale[1]) > 8 * math.ulp(radial):
+                    raise NativePlanningError("collision_geometry_unsupported")
+                cylinder_scale = (radial, radial, cylinder_scale[2])
+            representation = (
+                PlanningGeometryRepresentation.CAPSULE if is_capsule else PlanningGeometryRepresentation.CYLINDER
+            )
+            inline = PlanningPrimitiveGeometry(representation, (radius, height))
             return (
                 PlanningGeometryDescriptor(
                     geometry_id,
@@ -2176,7 +2293,7 @@ class _PlanningAdmission:
                     owner_link_id,
                     owner_frame_id,
                     PlanningGeometryPurpose.COLLISION,
-                    PlanningGeometryRepresentation.CYLINDER,
+                    representation,
                     cylinder_pose,
                     cylinder_scale,
                     motion,
@@ -2185,7 +2302,7 @@ class _PlanningAdmission:
                     _json_sha256(
                         {
                             **common,
-                            "representation": "cylinder",
+                            "representation": representation.value,
                             "dimensions": inline.dimensions_m,
                             "axis": axis,
                             "canonical_axis": "Z",

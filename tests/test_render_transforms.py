@@ -190,6 +190,7 @@ def test_native_frame_batches_entities_and_rebuilds_when_body_layout_changes(mon
     world = object.__new__(IsaacLabNativeWorld)
     world._m = SimpleNamespace(torch=torch)
     world._render_transform_publishers = {}
+    world._usd_rigid_views = {}
     robot, box = EntityPath("/robot"), EntityPath("/box")
     robot_poses = torch.tensor([[1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0], [4.0, 5.0, 6.0, 0.0, 0.0, 1.0, 0.0]])
     box_poses = torch.tensor([[7.0, 8.0, 9.0, 0.0, 1.0, 0.0, 0.0]])
@@ -219,6 +220,18 @@ def test_native_frame_batches_entities_and_rebuilds_when_body_layout_changes(mon
     world._publish_render_body_transforms((), (box,))
     assert len(publishers) == 3 and publishers[-1].paths == ("/W/box_new",)
     assert len(world._render_transform_publishers) == 1
+    # Embedded scene rigid bodies do not use Isaac Lab RigidObject caches.
+    # They must reach the same Fabric publisher, even without a physics tick.
+    del world._rigids[box]
+    world._usd_rigid_views[box] = SimpleNamespace(
+        prim_paths=("/W/scene/plug",), get_transforms=lambda: box_poses
+    )
+    world._publish_render_body_transforms((robot,), (box,))
+    assert publishers[-1].paths == ("/W/base", "/W/base/arm", "/W/scene/plug")
+    assert torch.equal(publishers[-1].frames[-1][-1:], box_poses)
+    box_poses = box_poses + torch.tensor([[0.0, 0.0, 0.04, 0.0, 0.0, 0.0, 0.0]])
+    world._publish_render_body_transforms((robot,), (box,))
+    assert torch.equal(publishers[-1].frames[-1][-1:], box_poses)
 
 
 def test_fabric_batch_prepares_all_views_before_writes_then_propagates_once(monkeypatch):

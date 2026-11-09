@@ -71,6 +71,7 @@ def _world(raw: bool, count: int) -> tuple[IsaacLabNativeWorld, _Tensor, _Tensor
     world._usd_rigid_views = {path: SimpleNamespace(
         get_transforms=lambda: poses,
         get_velocities=lambda: velocities,
+        get_coms=lambda: _Tensor([[0.0] * 7 for _ in range(count)], transfers, "com"),
     )} if raw else {}
     world._rigids = {} if raw else {path: SimpleNamespace(data=SimpleNamespace(
         root_link_pose_w=SimpleNamespace(torch=poses),
@@ -96,7 +97,8 @@ def test_rigid_read_transfers_pose_and_velocity_once_without_changing_values(raw
     )
     assert poses.values == original_poses
     assert velocities.values == original_velocities
-    assert transfers == ["pose", "velocity"]
+    expected_transfers = ["pose", "velocity", "com"] if raw else ["pose", "velocity"]
+    assert transfers == expected_transfers
 
     poses.values[0][0] = 12.0
     velocities.values[0][0] = 7.0
@@ -105,7 +107,24 @@ def test_rigid_read_transfers_pose_and_velocity_once_without_changing_values(raw
     assert following[2][0] == (7.0, 2.0, 3.0)
     assert result[0][0] == (1.0, 2.0, 3.0)
     assert result[2][0] == (1.0, 2.0, 3.0)
-    assert transfers == ["pose", "velocity", "pose", "velocity"]
+    assert transfers == expected_transfers * 2
+
+
+def test_raw_rigid_rotation_uses_actor_origin_velocity_and_preserves_native_com_twist():
+    world, poses, velocities, transfers = _world(True, 2)
+    path = EntityPath("/objects/mug")
+    poses.values = [[11., 22., 33., 0., 0., 2**-.5, 2**-.5],
+                    [41., 52., 63., 0., 0., 0., 1.]]
+    velocities.values = [[-2., 0., 0., 0., 0., 2.], [1., 2., 3., 0., 0., 0.]]
+    coms = _Tensor([[1., 0., 0., 0., 0., 0., 1.], [.2, .3, .4, 0., 0., 0., 1.]], transfers, "com")
+    world._usd_rigid_views[path].get_coms = lambda: coms
+    result = world.read_rigid_body(path)
+    assert result[2][0] == pytest.approx((0., 0., 0.))
+    assert result[2][1] == (1., 2., 3.)
+    assert result[3] == ((0., 0., 2.), (0., 0., 0.))
+    assert velocities.values[0] == [-2., 0., 0., 0., 0., 2.]
+    assert coms.values[0][:3] == [1., 0., 0.]
+    assert transfers == ["pose", "velocity", "com"]
 
 
 @pytest.mark.parametrize("raw", [False, True], ids=["asset", "usd-view"])

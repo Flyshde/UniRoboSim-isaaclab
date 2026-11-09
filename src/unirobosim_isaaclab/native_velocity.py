@@ -5,6 +5,30 @@ from __future__ import annotations
 from typing import Any
 
 
+def root_link_velocity_rows_from_com(poses: Any, velocities: Any, coms: Any) -> list[list[float]]:
+    """Convert raw-view COM twists to actor-origin twists after batched readback.
+
+    PhysX returns world COM velocity but actor poses. The public rigid state
+    pairs actor pose and twist, as does Isaac Lab's ``root_link_vel_w``.
+    COM positions are actor-local; angular velocities stay world-referenced.
+    No native state is written and the input rows remain unchanged.
+    """
+    result = []
+    for pose, velocity, com in zip(poses, velocities, coms, strict=True):
+        x, y, z, w = pose[3:7]
+        a, b, c = com[:3]
+        tx, ty, tz = 2 * (y * c - z * b), 2 * (z * a - x * c), 2 * (x * b - y * a)
+        rx, ry, rz = a + w * tx + y * tz - z * ty, b + w * ty + z * tx - x * tz, c + w * tz + x * ty - y * tx
+        wx, wy, wz = velocity[3:6]
+        result.append([
+            velocity[0] - (wy * rz - wz * ry),
+            velocity[1] - (wz * rx - wx * rz),
+            velocity[2] - (wx * ry - wy * rx),
+            wx, wy, wz,
+        ])
+    return result
+
+
 def root_com_velocity_from_link(torch: Any, root_pose: Any, link_velocity: Any, local_com_position: Any) -> Any:
     """Convert saved world link twist to world COM twist without world subtraction.
 

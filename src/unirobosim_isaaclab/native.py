@@ -59,7 +59,7 @@ from .native_protocols import (
 )
 from .native_state import ArticulationStateCache
 from .native_targets import JointTargetVersions
-from .native_velocity import root_com_velocity_from_link
+from .native_velocity import root_com_velocity_from_link, root_link_velocity_rows_from_com
 from .physics_activation import (
     DynamicRigidBodyCandidate,
     PhysicsActivationController,
@@ -1250,6 +1250,8 @@ class IsaacLabNativeWorld:
         self._entity_prim_path_cache: dict[tuple[EntityPath, int], str] = {}
         self._entity_prim_physical_root_cache: dict[tuple[EntityPath, int], bool] = {}
         self._runtime_attachments: dict[tuple[int, str], _RuntimeAttachment] = {}
+        self._runtime_connections: dict[tuple[int, str], Any] = {}
+        self._admitted_connections: set[tuple[int, str]] = set()
         self._static_scene_roots: dict[EntityPath, tuple[str, ...]] = {}
         self._composite_scene_roots: dict[EntityPath, tuple[str, ...]] = {}
         self._composite_scene_modes: dict[EntityPath, str] = {}
@@ -3310,6 +3312,12 @@ class IsaacLabNativeWorld:
             self._initial_deformable[path] = (state, target)
 
     def reset(self, environment_indices: tuple[int, ...]) -> None:
+        from .compliant_connection import clear
+
+        clear(self, environment_indices)
+        if hasattr(self, "_admitted_connections"):
+            self._admitted_connections.difference_update(
+                key for key in tuple(self._admitted_connections) if key[0] in environment_indices)
         for path, meshes in getattr(self, "_render_deformables", {}).items():
             entity = self._entity_specs[path]
             spec = entity.deformable
@@ -3847,6 +3855,9 @@ class IsaacLabNativeWorld:
                 origins = torch.tensor(self._origins_cpu, device=transforms.device, dtype=transforms.dtype)[indices]
                 poses = torch.cat((positions + origins, orientations), dim=1)
                 velocities = torch.cat((linear, angular), dim=1)
+                if not self._kinematic_rigids[rigid_update.path]:
+                    coms = target.get_coms().to(device=poses.device, dtype=poses.dtype)
+                    velocities = root_com_velocity_from_link(torch, poses, velocities, coms[indices, :3])
                 rigid_stages.append(("usd", rigid_update.path, target, indices, poses, velocities))
             else:
                 target = self._rigids.get(rigid_update.path)
@@ -4089,7 +4100,7 @@ class IsaacLabNativeWorld:
         # retain prior body transforms when no physics tick has advanced.
         self._publish_render_body_transforms(
             tuple(path for kind, path, *_ in articulation_stages if kind != "usd"),
-            tuple(path for kind, path, *_ in rigid_stages if kind != "usd"),
+            tuple(path for _, path, *_ in rigid_stages),
         )
         self._sync_all_mounted_cameras()
         self._invalidate_render()
@@ -4111,6 +4122,13 @@ class IsaacLabNativeWorld:
             paths.extend(str(value) for row in asset.root_view.link_paths for value in row)
             pose_batches.append(asset.data.body_link_pose_w.torch.reshape(-1, 7))
         for path in rigid_paths:
+            if path in self._usd_rigid_views:
+                # Embedded rigid bodies also need Fabric publication during
+                # paused Replay; writing USD alone does not update RTX's view.
+                view = self._usd_rigid_views[path]
+                paths.extend(str(value) for value in view.prim_paths)
+                pose_batches.append(view.get_transforms().reshape(-1, 7))
+                continue
             asset = self._rigids[path]
             paths.extend(str(value) for value in asset.root_view.prim_paths)
             pose_batches.append(asset.data.root_link_pose_w.torch.reshape(-1, 7))
@@ -4646,6 +4664,10 @@ class IsaacLabNativeWorld:
     def capture_checkpoint(self) -> dict[str, object]:
         """Capture all mutable physical state without advancing physics or rendering."""
 
+        if (getattr(self, "_runtime_connections", None)
+                or getattr(self._spec, "compliant_connections", ())):
+            raise ValueError("checkpoints with compliant connection state are not supported")
+
         values = self._checkpoint_values
         articulations: dict[str, object] = {}
         for path, asset in self._articulations.items():
@@ -5077,6 +5099,9 @@ class IsaacLabNativeWorld:
         return staged
 
     def _apply_staged_checkpoint(self, staged: dict[str, object]) -> None:
+        from .compliant_connection import clear
+
+        clear(self)
         stage = self._m.sim_utils.get_current_stage()
         for attachment in tuple(self._runtime_attachments.values()):
             stage.RemovePrim(attachment.joint_prim_path)
@@ -5244,6 +5269,9 @@ class IsaacLabNativeWorld:
         # Transfer each complete tensor once; split its fields on the CPU.
         pose_rows = pose.detach().cpu().tolist()
         velocity_rows = velocity.detach().cpu().tolist()
+        if path in self._usd_rigid_views:
+            com_rows = view.get_coms().detach().cpu().tolist()
+            velocity_rows = root_link_velocity_rows_from_com(pose_rows, velocity_rows, com_rows)
         return (
             tuple(tuple(float(value) for value in row[:3]) for row in pose_rows),
             tuple(tuple(float(value) for value in row[3:]) for row in pose_rows),
@@ -6348,7 +6376,7 @@ class IsaacLabNativeWorld:
                 cast(Vector3, positions[environment]), cast(tuple[float, float, float, float], rotations[environment])
             )
             linear, omega = cast(Vector3, velocities[environment]), cast(Vector3, angular[environment])
-            raw_view = getattr(self, "_usd_rigid_views", {}).get(mount.parent_path)
+            # read_rigid_body already returns actor-origin twist for raw rigids.
         if raw_view is not None:
             local = raw_view.get_coms()[environment, :3].detach().cpu().tolist()
             offset = _rotate_xyzw(cast(Vector3, tuple(local)), pose.orientation_xyzw)
@@ -6432,6 +6460,12 @@ class IsaacLabNativeWorld:
                 if render and not deferred_particle_render:
                     self._mark_rendered()
                 self._update_assets(self._native_dt)
+                if (getattr(self, "_runtime_connections", None)
+                        or getattr(self._spec, "compliant_connections", ())):
+                    from .compliant_connection import update, update_declared
+
+                    update(self, _relative_pose)
+                    update_declared(self, _relative_pose)
                 if deferred_particle_render:
                     self._ensure_camera_render()
             self._step_index += 1
@@ -6520,6 +6554,8 @@ class IsaacLabNativeWorld:
                 raise RuntimeError(f"CUDA could not unregister the RGB shared host allocation: {result}")
         self._runtime_attachments.clear()
         self._debug_expirations.clear()
+        self._runtime_connections.clear()
+        self._admitted_connections.clear()
         self._debug_lifetimes.clear()
         if self._debug_mesh_paths:
             stage = self._m.sim_utils.get_current_stage()
