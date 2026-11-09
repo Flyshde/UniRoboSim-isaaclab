@@ -1171,6 +1171,7 @@ class IsaacLabNativeRuntime:
         )
         self._config = config
         self._active_world: IsaacLabNativeWorld | None = None
+        self._retained_visibility_layers: list[object] = []
         self._closed = False
         if startup_progress is not None:
             startup_progress("runtime_ready")
@@ -1216,7 +1217,10 @@ class IsaacLabNativeRuntime:
             if world is not None:
                 world._close(notify_runtime=False)
         finally:
-            self._app.close()
+            try:
+                self._app.close()
+            finally:
+                self._retained_visibility_layers.clear()
 
 
 class IsaacLabNativeWorld:
@@ -3318,6 +3322,9 @@ class IsaacLabNativeWorld:
         if hasattr(self, "_admitted_connections"):
             self._admitted_connections.difference_update(
                 key for key in tuple(self._admitted_connections) if key[0] in environment_indices)
+        from .render_visibility import clear as clear_visibility
+
+        clear_visibility(self)
         for path, meshes in getattr(self, "_render_deformables", {}).items():
             entity = self._entity_specs[path]
             spec = entity.deformable
@@ -5833,6 +5840,10 @@ class IsaacLabNativeWorld:
         self._sim.forward()
         self._invalidate_render()
 
+    def apply_render_visibility(self, overrides):
+        from .render_visibility import apply
+        return apply(self, overrides)
+
     def capture_appearance(self):
         from .native_appearance import capture
 
@@ -6504,6 +6515,8 @@ class IsaacLabNativeWorld:
             },
             flush=True,
         )
+        from .render_visibility import clear
+        clear(self)
         primary_scope = getattr(self, "_primary_ray_partition_scope", None)
         if primary_scope is not None:
             primary_scope.close()
