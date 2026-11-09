@@ -69,6 +69,9 @@ class FakeRawRigidView:
     def get_transforms(self) -> FakeTensor:
         return FakeTensor("current_transforms")
 
+    def get_velocities(self) -> FakeTensor:
+        return FakeTensor("current_velocities")
+
     def set_transforms(self, transforms: object, indices: object) -> None:
         del transforms, indices
         self.calls.append("pose")

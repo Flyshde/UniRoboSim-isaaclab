@@ -144,8 +144,10 @@ def update_declared(native: Any, relative_pose: Any) -> None:
             key = (environment, declaration.connection_id)
             if key in native._admitted_connections:
                 continue
-            if not all(native._entity_prim_is_physical_root(path, environment)
-                       for path in (declaration.parent_path, declaration.child_path)):
+            if not all(
+                native._entity_prim_is_physical_root(path, environment)
+                for path in (declaration.parent_path, declaration.child_path)
+            ):
                 raise ValueError("compliant connections require physical asset-root endpoints")
             parent = native._attachment_endpoint_pose(declaration.parent_path, None, environment)
             child = native._attachment_endpoint_pose(declaration.child_path, None, environment)

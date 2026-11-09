@@ -330,8 +330,9 @@ def _assert_embedded_rigid_render_state_reaches_fabric_publication() -> None:
     world._usd_rigid_views[path] = SimpleNamespace(
         get_transforms=lambda: poses,
         get_coms=lambda: torch.zeros((2, 7)),
-        set_transforms=lambda values, indices: poses.index_copy_(0, indices, values),
-        set_velocities=lambda values, indices: velocities.index_copy_(0, indices, values),
+        get_velocities=lambda: velocities,
+        set_transforms=lambda values, indices: poses.index_copy_(0, indices, values[indices]),
+        set_velocities=lambda values, indices: velocities.index_copy_(0, indices, values[indices]),
     )
     world._usd_rigid_wrenches[path] = (torch.ones((2, 3)), torch.ones((2, 3)))
     world._m.omni_physx = SimpleNamespace(get_physx_interface=lambda: SimpleNamespace(

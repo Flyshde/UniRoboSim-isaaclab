@@ -128,9 +128,11 @@ def test_prescribed_kinematic_replay_has_no_connector_forces(monkeypatch):
 
 def test_wrapped_asset_root_is_rejected_before_using_body_frame_as_asset_frame():
     c = CompliantConnectionSpec("socket", EntityPath("/phone"), EntityPath("/plug"), Pose(), properties())
-    native = SimpleNamespace(_spec=SimpleNamespace(compliant_connections=(c,),
-                                                  environments=SimpleNamespace(count=1)),
-                             _kinematic_rigids={}, _admitted_connections=set(),
-                             _entity_prim_is_physical_root=lambda *_: False)
+    native = SimpleNamespace(
+        _spec=SimpleNamespace(compliant_connections=(c,), environments=SimpleNamespace(count=1)),
+        _kinematic_rigids={},
+        _admitted_connections=set(),
+        _entity_prim_is_physical_root=lambda *_: False,
+    )
     with pytest.raises(ValueError, match="physical asset-root endpoints"):
         update_declared(native, lambda *_: pytest.fail("No frame substitution is permitted"))

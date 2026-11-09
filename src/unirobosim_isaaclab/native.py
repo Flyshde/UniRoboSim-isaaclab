@@ -547,9 +547,17 @@ def _write_usd_rigid_state(
 ) -> None:
     """Write a raw USD rigid state while respecting PhysX kinematic semantics."""
 
-    view.set_transforms(transforms, indices)
+    # PhysX tensor setters require full view-sized buffers, even when indices
+    # select only a subset. The caller supplies rows in selection order.
+    full_transforms = view.get_transforms().clone()
+    full_transforms[indices] = transforms
+    full_velocities = None
     if not kinematic:
-        view.set_velocities(velocities, indices)
+        full_velocities = view.get_velocities().clone()
+        full_velocities[indices] = velocities
+    view.set_transforms(full_transforms, indices)
+    if full_velocities is not None:
+        view.set_velocities(full_velocities, indices)
 
 
 def _write_high_level_rigid_state(
