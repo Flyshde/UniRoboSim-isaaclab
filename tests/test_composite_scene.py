@@ -764,6 +764,9 @@ class _Tensor:
     def __getitem__(self, key: object) -> _Tensor:
         return _Tensor(f"{self.name}[{key!r}]")
 
+    def __setitem__(self, key: object, value: object) -> None:
+        self.name = f"{self.name}[{key!r}]={value!r}"
+
 
 class _Torch:
     int64 = "int64"
@@ -776,6 +779,12 @@ class _Torch:
 class _RigidView:
     def __init__(self) -> None:
         self.calls: list[str] = []
+
+    def get_transforms(self) -> _Tensor:
+        return _Tensor("current_poses")
+
+    def get_velocities(self) -> _Tensor:
+        return _Tensor("current_velocities")
 
     def set_transforms(self, values: object, indices: object) -> None:
         del values, indices

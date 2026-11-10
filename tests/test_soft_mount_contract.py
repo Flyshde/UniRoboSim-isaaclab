@@ -15,6 +15,20 @@ from unirobosim import (
 from unirobosim_isaaclab.deformable_mounts import author_rigid_mount
 
 
+def test_raw_rigid_mount_does_not_convert_actor_origin_velocity_twice():
+    from unirobosim_isaaclab.native import IsaacLabNativeWorld
+
+    path = EntityPath('/parent')
+    world = object.__new__(IsaacLabNativeWorld)
+    world._entity_specs = {path: EntitySpec(path, EntityKind.RIGID_BODY)}
+    world._usd_rigid_views = {path: NS(get_coms=lambda: pytest.fail('actor twist converted twice'))}
+    world.read_rigid_body = lambda _: (((0., 0., 0.),), ((0., 0., 0., 1.),),
+                                     ((1., 2., 3.),), ((0., 0., 2.),))
+    _, velocity, angular = world._soft_mount_parent_state(NS(parent_path=path), 0)
+    assert velocity == (1., 2., 3.)
+    assert angular == (0., 0., 2.)
+
+
 @pytest.mark.parametrize(
     "failure", ["omniphysics:src0", "omniphysics:src1", "omniphysics:vtxIndicesSrc0", "omniphysics:localPositionsSrc1"]
 )

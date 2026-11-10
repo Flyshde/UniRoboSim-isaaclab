@@ -422,3 +422,17 @@ Sleep values not exposed by this tensor interface are explicitly unsupported;
 no authored-value substitution is performed. Runtime support for selected static
 contact filters must be validated on the installed PhysX SDK; unsupported or
 ambiguous mappings fail rather than returning fabricated evidence.
+
+### Explicit replay visibility
+
+Version 0.10.29 adds `render.visibility.apply@1` and
+`World.apply_render_visibility(tuple[RenderVisibilityOverride, ...])` for one
+static/composite environment. Up to 32 exact relative Imageable paths may change
+from authored and effective `invisible` to effective `inherited`. The entire batch
+is validated before a world-owned anonymous session layer is installed. Missing,
+ambiguous, instance-proxy, animated, duplicate, overlapping, escaping or
+ancestor-hidden targets fail. Readback failure removes the layer. Reset and close
+remove it, without saving source assets. Each world accepts one batch until reset.
+Typed receipts prove before/after visibility; geometry, materials and physics are
+not edited. Invoke through a declared strict replay visibility option after source
+identity admission and before camera capture, not to bypass replay compatibility.

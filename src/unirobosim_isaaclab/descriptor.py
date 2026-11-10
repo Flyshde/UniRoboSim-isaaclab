@@ -2,12 +2,14 @@
 
 from dataclasses import replace
 
+import unirobosim
 from unirobosim import (
     CHECKPOINT_CAPABILITY_ID,
     COMPOSITE_WORLD_SCHEMA_VERSION,
     PHYSICAL_WORLD_SCHEMA_VERSION,
     RENDER_QUALITY_CAPABILITY_ID,
     RENDER_STATE_CAPABILITY_ID,
+    RENDER_VISIBILITY_CAPABILITY_ID,
     WORLD_SCHEMA_VERSION,
     CapabilityDeclaration,
     CapabilityId,
@@ -232,6 +234,7 @@ CAPABILITIES = CapabilitySet(
         ),
         CapabilityDeclaration(CapabilityId("state.articulation@1")),
         CapabilityDeclaration(RENDER_QUALITY_CAPABILITY_ID),
+        CapabilityDeclaration(RENDER_VISIBILITY_CAPABILITY_ID),
         CapabilityDeclaration(
             RENDER_STATE_CAPABILITY_ID,
             FrozenMap(
@@ -342,6 +345,8 @@ CAPABILITIES = CapabilitySet(
         CapabilityDeclaration(CapabilityId("scene.snapshot@1")),
         CapabilityDeclaration(CapabilityId("scene.delta@1")),
         CapabilityDeclaration(CapabilityId("scene.command.pose@1")),
+        *((CapabilityDeclaration(CapabilityId("physics.compliant_connections@1")),)
+          if hasattr(unirobosim, "CompliantConnectionSpec") else ()),
         CapabilityDeclaration(
             CapabilityId("scene.command.attachment@1"),
             FrozenMap(

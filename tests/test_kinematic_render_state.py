@@ -13,7 +13,7 @@ from unirobosim_isaaclab.native_protocols import NativeRenderRigidBodyState, Nat
 from .test_render_state import _native_world
 
 
-def _check(raw: bool, kinematic: bool, nonzero: bool, invalid: bool = False) -> None:
+def _check(raw: bool, kinematic: bool, nonzero: bool, invalid: bool = False, device: str = "cpu") -> None:
     import torch
 
     world, sim, _, rigid, _, events = _native_world()
@@ -30,6 +30,12 @@ def _check(raw: bool, kinematic: bool, nonzero: bool, invalid: bool = False) -> 
 
         class View:
             def get_transforms(self):
+                return torch.zeros((2, 7), device=device)
+
+            def get_velocities(self):
+                return torch.zeros((2, 6), device=device)
+
+            def get_coms(self):
                 return torch.zeros((2, 7))
 
             def set_transforms(self, v, ids):
@@ -62,7 +68,7 @@ def _check(raw: bool, kinematic: bool, nonzero: bool, invalid: bool = False) -> 
     world.apply_render_state(frame)
     expected = [[13.0, 22.0, 31.0, 0.0, 0.0, 0.0, 1.0]]
     if raw:
-        assert calls[0][0] == "pose" and calls[0][1].tolist() == expected and calls[0][2] == [1]
+        assert calls[0][0] == "pose" and calls[0][1].tolist() == [[0.0] * 7] + expected and calls[0][2] == [1]
         assert len(calls) == (1 if kinematic else 2)
         assert world._usd_rigid_wrenches[path][0][0].tolist() == [1.0, 1.0, 1.0]
     else:
@@ -76,6 +82,19 @@ def _check(raw: bool, kinematic: bool, nonzero: bool, invalid: bool = False) -> 
     assert events.count("publish") == events.count("sync") == 1
 
 
+def test_gpu_embedded_render_with_cpu_physx_com_parameters():
+    expression = (
+        "import torch; import sys; "
+        "sys.exit(77) if not torch.cuda.is_available() else None; "
+        "from tests.test_kinematic_render_state import _check; "
+        "_check(True, False, True, device='cuda:0')"
+    )
+    process = subprocess.run([sys.executable, "-c", expression], capture_output=True, text=True)
+    if process.returncode == 77:
+        pytest.skip("GPU required for native CPU-parameter/CUDA-state regression")
+    assert process.returncode == 0, process.stdout + process.stderr
+
+
 @pytest.mark.parametrize("raw", [False, True], ids=["high", "usd"])
 @pytest.mark.parametrize(
     "kinematic,nonzero,invalid", [(True, False, False), (True, True, False), (False, True, False), (True, False, True)]
@@ -85,6 +104,73 @@ def test_recorded_rigid_restoration_without_physics(raw, kinematic, nonzero, inv
     expression = (
         "from tests.test_kinematic_render_state import _check; "
         f"_check({raw!r}, {kinematic!r}, {nonzero!r}, {invalid!r})"
+    )
+    p = subprocess.run([sys.executable, "-c", expression], capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+
+
+def _check_rotating_raw_rigid_round_trip():
+    import torch
+
+    world, _, _, _, _, _ = _native_world()
+    path = EntityPath("/box")
+    poses = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]] * 2)
+    velocities = torch.zeros((2, 6))
+    coms = torch.tensor([[0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]] * 2)
+    calls = []
+
+    def set_poses(values, indices):
+        assert values.shape == poses.shape
+        poses[indices] = values[indices]
+        calls.append("pose")
+
+    def set_velocities(values, indices):
+        assert values.shape == velocities.shape
+        velocities[indices] = values[indices]
+        calls.append("velocity")
+
+    world._rigids = {}
+    world._kinematic_rigids[path] = False
+    world._origins_cpu = ((0.0, 0.0, 0.0), (10.0, 20.0, 30.0))
+    world._usd_rigid_views[path] = SimpleNamespace(
+        get_transforms=lambda: poses,
+        get_velocities=lambda: velocities,
+        get_coms=lambda: coms,
+        set_transforms=set_poses,
+        set_velocities=set_velocities,
+    )
+    world._usd_rigid_wrenches[path] = (torch.zeros((2, 3)), torch.zeros((2, 3)))
+    world._m.omni_physx = SimpleNamespace(
+        get_physx_interface=lambda: SimpleNamespace(update_transformations=lambda *_: None)
+    )
+    frame = NativeRenderStateFrame(
+        (),
+        (
+            NativeRenderRigidBodyState(
+                path,
+                ((3.0, 2.0, 1.0),),
+                ((0.0, 0.0, 2**-0.5, 2**-0.5),),
+                ((0.01, 0.02, 0.03),),
+                ((0.0, 0.0, 2.0),),
+                (1,),
+            ),
+        ),
+        (),
+    )
+    world.apply_render_state(frame)
+    assert velocities[1, :3].tolist() == pytest.approx((-0.03, 0.02, 0.03), abs=1e-7)
+    assert velocities[0].tolist() == [0.0] * 6
+    read = world.read_rigid_body(path)
+    assert read[0][1] == pytest.approx((3.0, 2.0, 1.0))
+    assert read[2][1] == pytest.approx((0.01, 0.02, 0.03), abs=1e-7)
+    assert read[3][1] == (0.0, 0.0, 2.0)
+    assert calls == ["pose", "velocity"]
+
+
+def test_rotating_raw_rigid_round_trip_preserves_actor_twist():
+    expression = (
+        "from tests.test_kinematic_render_state import _check_rotating_raw_rigid_round_trip; "
+        "_check_rotating_raw_rigid_round_trip()"
     )
     p = subprocess.run([sys.executable, "-c", expression], capture_output=True, text=True)
     assert p.returncode == 0, p.stdout + p.stderr
