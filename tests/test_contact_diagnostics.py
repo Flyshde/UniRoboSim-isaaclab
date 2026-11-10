@@ -339,6 +339,18 @@ def test_drive_diagnostics_reads_native_targets_in_selected_order_without_setter
 
 
 def test_static_contact_mapping_uses_admitted_collider_and_rejects_dynamic():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from tests.test_contact_diagnostics import _check_static_contact_mapping; "
+         "_check_static_contact_mapping()"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _check_static_contact_mapping():
     from types import SimpleNamespace
     from pxr import Usd, UsdGeom, UsdPhysics
     from unirobosim import PlanningGeometryMotionClass
