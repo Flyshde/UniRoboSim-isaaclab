@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from unirobosim import (
+    ArticulationDiagnosticsRequest,
+    ArticulationDriveEvidence,
     CameraModality,
     CommandMode,
     ContactDiagnosticsRequest,
@@ -31,6 +33,14 @@ from unirobosim import (
     Pose,
     WorldSpec,
 )
+
+
+@runtime_checkable
+class NativeArticulationDiagnosticsDriver(Protocol):
+    def articulation_diagnostics(
+        self, request: ArticulationDiagnosticsRequest,
+    ) -> tuple[ArticulationDriveEvidence, ...]: ...
+
 
 Matrix = tuple[tuple[float, ...], ...]
 

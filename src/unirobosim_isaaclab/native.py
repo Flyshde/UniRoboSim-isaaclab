@@ -19,6 +19,8 @@ from typing import Any, cast
 from urllib.parse import unquote, urlparse
 
 from unirobosim import (
+    ArticulationDiagnosticsRequest,
+    ArticulationDriveEvidence,
     CameraModality,
     CommandMode,
     ContactDiagnosticsRequest,
@@ -5738,18 +5740,53 @@ class IsaacLabNativeWorld:
         self._update_assets(0.0)
         self._invalidate_render()
 
+    def articulation_diagnostics(
+        self, request: ArticulationDiagnosticsRequest,
+    ) -> tuple[ArticulationDriveEvidence, ...]:
+        if self._spec.environments.count != 1:
+            raise ValueError("drive diagnostics requires one environment")
+        path = request.entity_path
+        if path not in self._usd_articulation_views and path not in self._articulations:
+            raise ValueError("drive diagnostics requires an articulation tensor view")
+        spec = self._entity_specs[path]
+        if any(name not in spec.joint_names for name in request.joint_names):
+            raise ValueError("drive diagnostics selected an unknown joint")
+        indices = [self._joint_maps[path][spec.joint_names.index(name)] for name in request.joint_names]
+        usd_view = path in self._usd_articulation_views
+        view = self._usd_articulation_views[path] if usd_view else self._articulations[path].root_view
+        # Read the existing simulator-owned view. No setters, stepping, waking, or USD inference.
+        getters = (view.get_dof_positions, view.get_dof_velocities,
+                   view.get_dof_position_targets, view.get_dof_velocity_targets,
+                   view.get_dof_stiffnesses, view.get_dof_dampings,
+                   view.get_dof_max_forces, view.get_dof_actuation_forces)
+        columns = [getter()[0, indices].detach().cpu().tolist() if usd_view
+                   else getter().numpy()[0, indices].tolist() for getter in getters]
+        return tuple(ArticulationDriveEvidence(name, *(float(c[i]) for c in columns))
+                     for i, name in enumerate(request.joint_names))
+
+    def _static_contact_path_pose(self, geometry_id: str) -> tuple[str, tuple[float, ...]]:
+        raise ValueError("static contact selection requires admitted planning geometry")
+
     def start_contact_diagnostics(self, request: ContactDiagnosticsRequest) -> int:
+        from unirobosim import StaticContactTarget
+
         from .contact_diagnostics import NativeContactDiagnostics
 
         if self._contact_diagnostics is not None:
             raise RuntimeError("contact diagnostics already has an owner")
         if self._spec.environments.count != 1 or self._has_fluid:
             raise ValueError("contact diagnostics requires one environment without particle fluid")
-        if request.subject.link_name is not None or request.subject.entity_path not in self._rigids:
-            raise ValueError("contact diagnostics subject must be a standalone rigid body")
+        if request.subject.entity_path not in self._rigids and request.subject.entity_path not in self._articulations:
+            raise ValueError("contact diagnostics subject must be a rigid or articulation body")
         stage = self._m.sim_utils.get_current_stage()
         paths = []
-        for target in (request.subject, *request.partners):
+        static_poses: dict[int, tuple[float, ...]] = {}
+        for index, target in enumerate((request.subject, *request.partners)):
+            if isinstance(target, StaticContactTarget):
+                path, pose = self._static_contact_path_pose(target.geometry_id)
+                paths.append(path)
+                static_poses[index] = pose
+                continue
             if target.entity_path not in self._rigids and target.entity_path not in self._articulations:
                 raise ValueError("contact diagnostics target is not a supported rigid/articulation body")
             root = stage.GetPrimAtPath(f"/World/env_0/{_native_name(target.entity_path)}")
@@ -5771,8 +5808,10 @@ class IsaacLabNativeWorld:
         tensor = self._sim.physics_sim_view
         if tensor is None:
             raise RuntimeError("contact diagnostics requires an active simulation view")
-        bodies = [tensor.create_rigid_body_view(p) for p in paths]
-        if any(v.count != 1 or tuple(v.prim_paths) != (p,) for v, p in zip(bodies, paths, strict=True)):
+        bodies: list[Any] = [static_poses[i] if i in static_poses else tensor.create_rigid_body_view(p)
+                  for i, p in enumerate(paths)]
+        if any(v.count != 1 or tuple(v.prim_paths) != (p,)
+               for i, (v, p) in enumerate(zip(bodies, paths, strict=True)) if i not in static_poses):
             raise ValueError("contact diagnostics rigid-body mapping changed")
         contact = tensor.create_rigid_contact_view(paths[0], filter_patterns=paths[1:],
                                                   max_contact_data_count=request.max_contact_points)

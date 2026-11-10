@@ -18,6 +18,12 @@ def _cpu(value: Any) -> np.ndarray:
     return cast(np.ndarray, value.numpy().copy())
 
 
+def _partner_pose(body: Any) -> np.ndarray:
+    if type(body) is tuple:
+        return np.asarray(body, dtype=float).copy()
+    return cast(np.ndarray, _cpu(body.get_transforms())[0])
+
+
 def _points(forces: np.ndarray, positions: np.ndarray, origin: np.ndarray) -> tuple[ContactForcePoint, ...]:
     return tuple(
         ContactForcePoint(tuple((p - origin).tolist()), tuple(f))
@@ -67,7 +73,7 @@ class NativeContactDiagnostics:
         subject, com, velocity = self._body_state(self.bodies[0])
         partners = []
         for body in self.bodies[1:]:
-            pose = _cpu(body.get_transforms())[0]
+            pose = _partner_pose(body)
             pose[:3] -= self.origin
             partners.append(pose)
         self._start = subject, com, velocity, partners
@@ -98,7 +104,7 @@ class NativeContactDiagnostics:
             torque = sum(
                 (np.cross(np.asarray(p.position_m) - start_com, p.force_n) for p in (*normal, *friction)), np.zeros(3)
             )
-            pose = _cpu(body.get_transforms())[0]
+            pose = _partner_pose(body)
             pose[:3] -= self.origin
             pairs.append(
                 ContactPairEvidence(

@@ -19,6 +19,8 @@ from unirobosim import (
     RENDER_STATE_CAPABILITY_ID,
     ArrayValue,
     ArticulationCommand,
+    ArticulationDiagnosticsRequest,
+    ArticulationDiagnosticsSnapshot,
     ArticulationState,
     BuildFingerprint,
     BuildReport,
@@ -68,6 +70,7 @@ from unirobosim import (
     SensorChannel,
     SensorSample,
     StaleHandleError,
+    StaticContactTarget,
     Tick,
     UniRoboSimError,
     UnsupportedCapabilityError,
@@ -80,6 +83,7 @@ from unirobosim import (
 
 from .native_protocols import (
     NativeArticulationCommand,
+    NativeArticulationDiagnosticsDriver,
     NativeCameraCalibration,
     NativeContactDiagnosticsDriver,
     NativeEncodedSensorFrame,
@@ -944,6 +948,20 @@ class IsaacLabWorld:
             tick=self.tick,
         )
 
+    def articulation_diagnostics(self, request: ArticulationDiagnosticsRequest) -> ArticulationDiagnosticsSnapshot:
+        operation = "world.articulation_diagnostics"
+        self._ensure_ready(operation)
+        if type(request) is not ArticulationDiagnosticsRequest:
+            raise ValidationError("invalid articulation diagnostics request", operation=operation)
+        self.resolve(request.entity_path)
+        if not isinstance(self._native, NativeArticulationDiagnosticsDriver):
+            raise UnsupportedCapabilityError("native drive diagnostics is unavailable", operation=operation)
+        driver = self._native
+        drives = self._native_call(operation, lambda: driver.articulation_diagnostics(request))
+        return ArticulationDiagnosticsSnapshot(
+            self.world_id, self.generation, self._step_index, request.entity_path, drives,
+        )
+
     def start_contact_diagnostics(self, request: ContactDiagnosticsRequest) -> int:
         operation = "world.start_contact_diagnostics"
         self._ensure_ready(operation)
@@ -954,7 +972,8 @@ class IsaacLabWorld:
                 "contact diagnostics requires one environment without fluid", operation=operation,
             )
         for target in (request.subject, *request.partners):
-            self.resolve(target.entity_path)
+            if not isinstance(target, StaticContactTarget):
+                self.resolve(target.entity_path)
         driver = self._contact_diagnostics_driver(operation)
         return self._native_call(operation, lambda: driver.start_contact_diagnostics(request))
 

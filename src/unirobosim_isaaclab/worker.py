@@ -23,6 +23,8 @@ from typing import Any, Protocol, cast
 
 import unirobosim
 from unirobosim import (
+    ArticulationDiagnosticsRequest,
+    ArticulationDriveEvidence,
     CommandMode,
     ContactDiagnosticsRequest,
     ContactDiagnosticsSample,
@@ -39,6 +41,7 @@ from .config import IsaacLabAdapterConfig
 from .native_protocols import (
     Matrix,
     NativeArticulationCommand,
+    NativeArticulationDiagnosticsDriver,
     NativeCameraCalibration,
     NativeContactDiagnosticsDriver,
     NativeEncodedSensorFrame,
@@ -409,6 +412,15 @@ def _dispatch(
         return None, None, True
 
     active = _require_world(world, operation)
+    if operation == "articulation_diagnostics":
+        if not isinstance(active, NativeArticulationDiagnosticsDriver):
+            raise RuntimeError("native drive diagnostics is unavailable")
+        try:
+            return active, active.articulation_diagnostics(cast(ArticulationDiagnosticsRequest, args[0])), False
+        except Exception as exc:
+            print("[FastSim native drive diagnostics failure]", operation, flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+            raise
     if operation in {"start_contact_diagnostics", "contact_diagnostics", "stop_contact_diagnostics"}:
         if not isinstance(active, NativeContactDiagnosticsDriver):
             raise RuntimeError("native contact diagnostics is unavailable")
@@ -1341,6 +1353,12 @@ class IsaacLabWorkerWorld:
             child_path,
             environment_index,
         )
+
+    def articulation_diagnostics(
+        self, request: ArticulationDiagnosticsRequest,
+    ) -> tuple[ArticulationDriveEvidence, ...]:
+        self._ensure_open("articulation_diagnostics")
+        return cast(tuple[ArticulationDriveEvidence, ...], self._runtime._request("articulation_diagnostics", request))
 
     def start_contact_diagnostics(self, request: ContactDiagnosticsRequest) -> int:
         self._ensure_open("start_contact_diagnostics")

@@ -291,3 +291,73 @@ def test_contact_torque_uses_pre_integration_com_and_retains_post_step_state():
     assert s.subject_com_start_m == (0, 0, 0)
     assert s.subject_com_m == (1, 0, 0)
     assert s.pairs[0].torque_about_subject_com_nm == pytest.approx((720, -240, -480))
+
+
+def test_static_partner_pose_and_robot_link_preserve_force_evidence():
+    from unirobosim import StaticContactTarget
+
+    request = ContactDiagnosticsRequest(
+        KinematicTarget("base", EntityPath("/robot"), "base_link"),
+        (StaticContactTarget("wall", "geometry.wall123"),),
+    )
+    pose = (2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 1.0)
+    evidence = NativeContactDiagnostics(request, [Body(), pose], Contact(), [1.0, 0.0, 0.0])
+    evidence.begin_step()
+    evidence.sample(1, 1, 1, 0.01)
+    sample = evidence.read(0)[0]
+    assert sample.pairs[0].partner_id == "wall"
+    assert sample.pairs[0].partner_pose_xyzw == (1.0, 3.0, 4.0, 0.0, 0.0, 0.0, 1.0)
+    assert sample.pairs[0].partner_pose_start_xyzw == sample.pairs[0].partner_pose_xyzw
+    assert sample.pairs[0].normal_force_n == (0.0, 0.0, 400.0)
+
+
+@pytest.mark.parametrize("usd_view", [True, False])
+def test_drive_diagnostics_reads_native_targets_in_selected_order_without_setters(usd_view):
+    from types import SimpleNamespace
+
+    from unirobosim import ArticulationDiagnosticsRequest
+
+    from unirobosim_isaaclab.native import IsaacLabNativeWorld
+
+    class View:
+        def __getattr__(self, name):
+            assert name.startswith("get_dof_"), "diagnostics must not mutate physics"
+            return lambda: tensor([[10.0, 20.0]])
+
+    path = EntityPath("/robot")
+    world = object.__new__(IsaacLabNativeWorld)
+    world._spec = SimpleNamespace(environments=SimpleNamespace(count=1))
+    world._entity_specs = {path: SimpleNamespace(joint_names=("y", "x"))}
+    world._joint_maps = {path: (1, 0)}
+    world._usd_articulation_views = {path: View()} if usd_view else {}
+    world._articulations = {} if usd_view else {path: SimpleNamespace(root_view=View())}
+    result = world.articulation_diagnostics(ArticulationDiagnosticsRequest(path, ("x", "y")))
+    assert [d.position_target for d in result] == [10.0, 20.0]
+    assert [d.max_force for d in result] == [10.0, 20.0]
+    with pytest.raises(ValueError, match="unknown joint"):
+        world.articulation_diagnostics(ArticulationDiagnosticsRequest(path, ("missing",)))
+
+
+def test_static_contact_mapping_uses_admitted_collider_and_rejects_dynamic():
+    from types import SimpleNamespace
+    from pxr import Usd, UsdGeom, UsdPhysics
+    from unirobosim import PlanningGeometryMotionClass
+    from unirobosim_isaaclab.native_planning import IsaacLabNativePlanningWorld
+
+    stage = Usd.Stage.CreateInMemory()
+    prim = UsdGeom.Cube.Define(stage, "/wall").GetPrim()
+    UsdPhysics.CollisionAPI.Apply(prim)
+    descriptor = SimpleNamespace(motion_class=PlanningGeometryMotionClass.STATIC)
+    world = object.__new__(IsaacLabNativePlanningWorld)
+    world._m = SimpleNamespace(UsdGeom=UsdGeom, UsdPhysics=UsdPhysics)
+    world._planning_admission = SimpleNamespace(
+        _geometries={"geometry.wall123": SimpleNamespace(descriptor=descriptor)},
+        _contact_prim_paths={"geometry.wall123": "/wall"}, _stage=stage,
+    )
+    path, pose = world._static_contact_path_pose("geometry.wall123")
+    assert path == "/wall" and pose == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    with pytest.raises(ValueError, match="absent"):
+        world._static_contact_path_pose("geometry.unknown")
+    descriptor.motion_class = PlanningGeometryMotionClass.DYNAMIC
+    with pytest.raises(ValueError, match="not static"):
+        world._static_contact_path_pose("geometry.wall123")
