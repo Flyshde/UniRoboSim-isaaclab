@@ -1,11 +1,11 @@
-## 0.10.30 (release candidate)
+## 0.10.30
 
 - Add finite, seat-gated compliant connections with bounded per-axis PhysX D6 drives, break-on-distance/angle, episode-local admission history and reset cleanup. Connector checkpoints are explicitly unsupported.
 - Preserve authored cable capsule geometry and exactly encode supported sparse collision-filter graphs.
 - Correct embedded rigid actor/COM velocity conversion and publish paused Replay transforms to Fabric.
 - Fix partial-environment raw PhysX rigid writes by supplying full view-sized setter buffers; retain untouched environments.
 - Preserve released 0.10.29.post1 Replay visibility and require UniRoboSim 0.10.13.
-- Native minimal-fixture checks do not establish complete phone insertion-task acceptance. This candidate is not published.
+- Native minimal-fixture checks do not establish complete phone insertion-task acceptance. Full phone-task acceptance and production deployment remain unverified.
 
 ## 0.10.27 production compatibility
 
